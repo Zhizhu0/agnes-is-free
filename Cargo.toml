@@ -1,0 +1,16 @@
+[package]
+name = "agnes-is-free"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+egui = "0.33"
+eframe = "0.33"
+reqwest = { version = "0.12", features = ["stream", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+comrak = "0.36"
+tokio = { version = "1", features = ["full"] }
+toml = "0.8"
+dirs = "5"
+futures-util = "0.3"
