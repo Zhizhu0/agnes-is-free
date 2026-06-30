@@ -36,3 +36,19 @@ src/
 ## Maintenance
 
 After making code changes, update the corresponding section of this file so it stays accurate. This file is the source of truth for future sessions — keep it in sync.
+
+## Known Issues & Fixes
+
+### Chinese Characters Not Displaying (CJK Rendering)
+
+**Problem:** egui defaults to Latin-only fonts, so Chinese (and other CJK) characters render as blank squares or invisible.
+
+**Root cause:** `egui::FontDefinitions` only contains the default Latin font set. CJK glyphs are not covered.
+
+**Fix:** In `src/main.rs`, added `chinese_font_data()` to load a system CJK font (Microsoft YaHei on Windows, PingFang SC on macOS, WenQuanYi Zenhei on Linux) and registered it as the fallback for `FontFamily::Proportional` via `cc.egui_ctx.set_fonts(fonts)` in the `app_creator` closure.
+
+**Files changed:** `src/main.rs` — added `chinese_font_data()` function, modified `main()` to call `cc.egui_ctx.set_fonts()`.
+
+---
+
+> **记录规范：** 每次遇到问题并解决后，都应在此处记录问题的现象、根因、修复方案和影响文件。这能让后续会话快速定位和修复同类问题，避免重复排查。
