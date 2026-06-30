@@ -299,6 +299,33 @@ impl AgnesApp {
 
 // ─── Entry point ───────────────────────────────────────────────────────
 
+/// Load a Chinese-supporting font so CJK characters render correctly.
+fn chinese_font_data() -> Option<Vec<u8>> {
+    let paths: &[&str] = &[
+        // Windows
+        "C:/Windows/Fonts/msyh.ttc",   // Microsoft YaHei
+        "C:/Windows/Fonts/simhei.ttf", // Black
+        "C:/Windows/Fonts/simsun.ttc", // SimSun
+        // macOS
+        "/System/Library/Fonts/Supplemental/PingFang.ttc",
+        // Linux
+        "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+        "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+    ];
+    for path in paths {
+        if let Ok(data) = std::fs::read(path) {
+            return Some(data);
+        }
+    }
+    // Allow overriding via env var
+    if let Ok(env_path) = std::env::var("AGNES_CHINESE_FONT") {
+        if let Ok(data) = std::fs::read(&env_path) {
+            return Some(data);
+        }
+    }
+    None
+}
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder {
@@ -311,6 +338,29 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Agnes AI Chat",
         options,
-        Box::new(|_cc| Ok(Box::new(AgnesApp::new()))),
+        Box::new(|cc| {
+            // Register Chinese font before creating the app
+            if let Some(font_data) = chinese_font_data() {
+                let mut fonts = egui::FontDefinitions::default();
+                fonts.font_data.insert(
+                    "chinese".into(),
+                    Arc::new(egui::FontData::from_owned(font_data)),
+                );
+                fonts.families.insert(
+                    egui::FontFamily::Proportional,
+                    fonts
+                        .families
+                        .get(&egui::FontFamily::Proportional)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .chain(std::iter::once("chinese".to_string()))
+                        .collect(),
+                );
+                cc.egui_ctx.set_fonts(fonts);
+            }
+
+            Ok(Box::new(AgnesApp::new()))
+        }),
     )
 }
