@@ -49,22 +49,54 @@ impl ImageGenClient {
     }
 
     /// Generate an image from a text prompt.
+    ///
+    /// When `reference_images` is non-empty, the request includes an
+    /// `extra_body.image` array (base64 data URLs) so the model performs
+    /// image-to-image generation (edit / style transfer / inpainting).
+    /// The prompt should describe the desired *change*, not the full scene.
+    ///
+    /// `width` and `height` control the output image size. Pass the reference
+    /// image's dimensions when editing, or a model-chosen/default size for
+    /// text-to-image generation.
+    ///
     /// Returns the raw PNG bytes on success.
     pub async fn generate(
         &self,
         base_url: &str,
         api_key: &str,
         prompt: &str,
+        reference_images: &[Vec<u8>],
+        width: u32,
+        height: u32,
     ) -> Result<Vec<u8>, ImageGenError> {
         let url = format!("{base_url}/images/generations");
-        eprintln!("[agnes] INFO: POST {url} (image generation)");
+        eprintln!("[agnes] INFO: POST {url} (image generation, {} reference image(s))", reference_images.len());
 
-        let body = serde_json::json!({
+        let size_str = format!("{width}x{height}");
+        let mut body = serde_json::json!({
             "model": "agnes-image-2.1-flash",
             "prompt": prompt,
-            "size": "1024x768",
+            "size": size_str,
             "return_base64": true,
         });
+
+        // When reference images are provided, add extra_body.image so the
+        // model receives them for image-to-image generation.
+        if !reference_images.is_empty() {
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD;
+            let image_urls: Vec<String> = reference_images
+                .iter()
+                .map(|bytes| {
+                    let encoded = b64.encode(bytes);
+                    format!("data:image/png;base64,{encoded}")
+                })
+                .collect();
+            body["extra_body"] = serde_json::json!({
+                "image": image_urls,
+                "response_format": "b64_json",
+            });
+        }
 
         let resp = self
             .client

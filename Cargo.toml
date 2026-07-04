@@ -17,3 +17,13 @@ futures-util = "0.3"
 image = "0.25"
 arboard = "3"
 base64 = "0.22"
+winapi = { version = "0.3", features = ["winuser", "winbase"] }
+open = "5"
+# Inline video playback via Windows Media Foundation (no external DLLs)
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+]}

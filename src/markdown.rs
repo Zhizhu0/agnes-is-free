@@ -195,7 +195,7 @@ fn flush_text(styles: &[Style], text: &str, out: &mut Vec<RichText>) {
         if s.code {
             rt = rt
                 .family(egui::FontFamily::Monospace)
-                .color(Color32::from_rgb(0x3a, 0x3a, 0x3a)); // dark gray, near black
+                .color(Color32::from_rgb(0x1a, 0x1a, 0x1a)); // near black for light backgrounds
         }
         if s.strikethrough {
             rt = rt.strikethrough();
