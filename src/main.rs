@@ -817,8 +817,11 @@ impl AgnesApp {
                                 MessageContent::Image { id } => {
                                     format!("Image{{{id}}}")
                                 }
-                                MessageContent::Video { id } => {
+                                 MessageContent::Video { id } => {
                                     format!("Video{{{id}}}")
+                                }
+                                MessageContent::ToolResult { tool_name, .. } => {
+                                    format!("ToolResult{{{tool_name}}}")
                                 }
                             };
                             let has_images = m
@@ -912,7 +915,6 @@ impl AgnesApp {
                             });
 
                             // Execute each tool call.
-                            let mut any_error = false;
                             for tc in tool_calls {
                                 // --- view_resource: make a resource visible ---
                                 if tc.name == "view_resource" {
@@ -921,17 +923,19 @@ impl AgnesApp {
                                         .and_then(|v| v.get("id").and_then(|x| x.as_i64()))
                                         .unwrap_or(-1);
                                     if raw_id <= 0 {
+                                        let err_msg = "Error: invalid resource ID".to_string();
                                         conversation.push(ChatMessage {
                                             role: Role::Tool,
-                                            content: MessageContent::Text(
-                                                "Error: invalid resource ID".into(),
-                                            ),
+                                            content: MessageContent::Text(err_msg.clone()),
                                             tool_calls: None,
                                             tool_call_id: Some(tc.id.clone()),
                                             image_urls: None,
                                             uploaded_image: None,
                                             ref_resource_id: None,
                                         });
+                                        state.lock().unwrap().messages.push(ChatMessage::tool_result(
+                                            "view_resource", &tc.arguments, &err_msg,
+                                        ));
                                         continue;
                                     }
                                     let res_id = format!("R{raw_id}");
@@ -941,29 +945,33 @@ impl AgnesApp {
                                         if !app_state.ai_visible_resources.contains(&res_id) {
                                             app_state.ai_visible_resources.push(res_id.clone());
                                         }
+                                        let ok_msg = format!("Resource R{raw_id} is now visible.");
                                         conversation.push(ChatMessage {
                                             role: Role::Tool,
-                                            content: MessageContent::Text(format!(
-                                                "Resource R{raw_id} is now visible."
-                                            )),
+                                            content: MessageContent::Text(ok_msg.clone()),
                                             tool_calls: None,
                                             tool_call_id: Some(tc.id.clone()),
                                             image_urls: None,
                                             uploaded_image: None,
                                             ref_resource_id: None,
                                         });
+                                        app_state.messages.push(ChatMessage::tool_result(
+                                            "view_resource", &tc.arguments, &ok_msg,
+                                        ));
                                     } else {
+                                        let err_msg = format!("Error: resource R{raw_id} does not exist");
                                         conversation.push(ChatMessage {
                                             role: Role::Tool,
-                                            content: MessageContent::Text(format!(
-                                                "Error: resource R{raw_id} does not exist"
-                                            )),
+                                            content: MessageContent::Text(err_msg.clone()),
                                             tool_calls: None,
                                             tool_call_id: Some(tc.id.clone()),
                                             image_urls: None,
                                             uploaded_image: None,
                                             ref_resource_id: None,
                                         });
+                                        state.lock().unwrap().messages.push(ChatMessage::tool_result(
+                                            "view_resource", &tc.arguments, &err_msg,
+                                        ));
                                     }
                                     continue;
                                 }
@@ -1175,6 +1183,7 @@ impl AgnesApp {
                                             // IMPORTANT: tell the model the task is done —
                                             // otherwise it often calls generate_image AGAIN
                                             // after we feed this response back into the loop.
+                                            let ok_msg = format!("Image generated successfully (id: {image_id})");
                                             conversation.push(ChatMessage {
                                                 role: Role::Tool,
                                                 content: MessageContent::Text(format!(
@@ -1182,11 +1191,16 @@ impl AgnesApp {
                                                     image_id
                                                 )),
                                                 image_urls: None,
-                                                ref_resource_id: Some(image_id),
+                                                ref_resource_id: Some(image_id.clone()),
                                                 tool_calls: None,
                                                 tool_call_id: Some(tc.id.clone()),
                                                 uploaded_image: None,
                                             });
+
+                                            // Show tool result in UI.
+                                            state.lock().unwrap().messages.push(ChatMessage::tool_result(
+                                                "generate_image", &tc.arguments, &ok_msg,
+                                            ));
 
                                             ctx.request_repaint();
                                         }
@@ -1194,18 +1208,19 @@ impl AgnesApp {
                                             log_error(&format!(
                                                 "Image generation failed: {e}"
                                             ));
-                                            conversation.push(ChatMessage {
+                                             let err_msg = format!("Image generation failed: {e}");
+                                             conversation.push(ChatMessage {
                                                 role: Role::Tool,
-                                                content: MessageContent::Text(format!(
-                                                    "Image generation failed: {e}"
-                                                )),
+                                                content: MessageContent::Text(err_msg.clone()),
                                                 tool_calls: None,
                                                 tool_call_id: Some(tc.id.clone()),
                                                 image_urls: None,
                                                 ref_resource_id: None,
                                                 uploaded_image: None,
                                             });
-                                            any_error = true;
+                                             state.lock().unwrap().messages.push(ChatMessage::tool_result(
+                                                "generate_image", &tc.arguments, &err_msg,
+                                            ));
                                         }
                                     }
                                     continue; // move to next tool call
@@ -1231,19 +1246,22 @@ impl AgnesApp {
                                                 .map(|(id, _)| id.clone())
                                                 .unwrap_or_default()
                                         };
+                                        let err_msg = format!(
+                                            "A video is already being generated ({existing_id}). \
+                                             Please wait for it to complete before requesting another video."
+                                        );
                                         conversation.push(ChatMessage {
                                             role: Role::Tool,
-                                            content: MessageContent::Text(format!(
-                                                "A video is already being generated ({}). \
-                                                 Please wait for it to complete before requesting another video.",
-                                                existing_id
-                                            )),
+                                            content: MessageContent::Text(err_msg.clone()),
                                             tool_calls: None,
                                             tool_call_id: Some(tc.id.clone()),
                                             image_urls: None,
                                             uploaded_image: None,
                                             ref_resource_id: None,
                                         });
+                                        state.lock().unwrap().messages.push(ChatMessage::tool_result(
+                                            "generate_video", &tc.arguments, &err_msg,
+                                        ));
                                         continue;
                                     }
 
@@ -1381,25 +1399,26 @@ impl AgnesApp {
                                         Ok(id) => id,
                                         Err(e) => {
                                             log_error(&format!("Failed to create video task: {e}"));
-                                            let mut app_state = state.lock().unwrap();
-                                            app_state.video_status.insert(
-                                                video_resource_id.clone(),
-                                                VideoStatus::Failed(format!("Failed to create task: {e}")),
-                                            );
-                                            ctx.request_repaint();
-                                            conversation.push(ChatMessage {
-                                                role: Role::Tool,
-                                                content: MessageContent::Text(format!(
-                                                    "Video generation task creation failed: {e}"
-                                                )),
-                                                tool_calls: None,
-                                                tool_call_id: Some(tc.id.clone()),
-                                                image_urls: None,
-                                                uploaded_image: None,
-                                                ref_resource_id: None,
-                                            });
-                                            any_error = true;
-                                            continue;
+                                         let err_msg = format!("Video generation task creation failed: {e}");
+                                             let mut app_state = state.lock().unwrap();
+                                             app_state.video_status.insert(
+                                                 video_resource_id.clone(),
+                                                 VideoStatus::Failed(format!("Failed to create task: {e}")),
+                                             );
+                                              ctx.request_repaint();
+                                              conversation.push(ChatMessage {
+                                                 role: Role::Tool,
+                                                 content: MessageContent::Text(err_msg.clone()),
+                                                 tool_calls: None,
+                                                 tool_call_id: Some(tc.id.clone()),
+                                                 image_urls: None,
+                                                 uploaded_image: None,
+                                                 ref_resource_id: None,
+                                             });
+                                             app_state.messages.push(ChatMessage::tool_result(
+                                                 "generate_video", &tc.arguments, &err_msg,
+                                             ));
+                                             continue;
                                         }
                                     };
 
@@ -1533,6 +1552,7 @@ impl AgnesApp {
                                     });
 
                                     // Push tool response — task is accepted, AI can continue.
+                                    let ok_msg = format!("Video generation task created (resource id: {video_resource_id})");
                                     conversation.push(ChatMessage {
                                         role: Role::Tool,
                                         content: MessageContent::Text(format!(
@@ -1548,6 +1568,11 @@ impl AgnesApp {
                                         uploaded_image: None,
                                         ref_resource_id: Some(video_resource_id.clone()),
                                     });
+
+                                    // Show tool result in UI.
+                                    state.lock().unwrap().messages.push(ChatMessage::tool_result(
+                                        "generate_video", &tc.arguments, &ok_msg,
+                                    ));
 
                                     ctx.request_repaint();
                                     continue; // move to next tool call
@@ -1580,16 +1605,9 @@ impl AgnesApp {
                             }
                             ctx.request_repaint();
 
-                            if any_error {
-                                // If all tool calls failed, break to avoid infinite loop.
-                                let mut app_state = state.lock().unwrap();
-                                app_state.streaming = false;
-                                app_state.generating_image = false;
-                                app_state.ai_visible_resources.clear();
-                                break;
-                            }
-                            // Otherwise, continue the loop to let the model respond
-                            // to tool results.
+                            // Always continue the loop — the model needs to see
+                            // tool results (including error messages) so it can
+                            // analyze the failure and respond to the user.
                             continue;
                         }
                         StreamResult::Text(text) => {
@@ -2168,6 +2186,41 @@ impl AgnesApp {
                 } else {
                     ui.label("🖼️ 图片加载中...");
                 }
+            }
+            MessageContent::ToolResult {
+                tool_name,
+                args_display,
+                result,
+            } => {
+                // Render tool call result as a collapsible card.
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        let icon = if result.starts_with("Error") || result.starts_with("❌") {
+                            "❌"
+                        } else {
+                            "✅"
+                        };
+                        ui.label(RichText::new(icon).size(14.0));
+                        ui.label(
+                            RichText::new(format!("Tool: {tool_name}"))
+                                .size(12.0)
+                                .color(Color32::GRAY),
+                        );
+                    });
+                    if !args_display.is_empty() {
+                        ui.label(
+                            RichText::new(format!("Args: {args_display}"))
+                                .size(11.0)
+                                .color(Color32::GRAY),
+                        );
+                    }
+                    let result_color = if result.starts_with("Error") || result.starts_with("❌") {
+                        Color32::from_rgb(0xFF, 0x44, 0x44)
+                    } else {
+                        Color32::from_rgb(0x44, 0xBB, 0x44)
+                    };
+                    ui.label(RichText::new(result).size(12.0).color(result_color));
+                });
             }
             MessageContent::Video { id } => {
                 // Render video card based on current status.

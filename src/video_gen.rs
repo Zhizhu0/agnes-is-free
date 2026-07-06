@@ -104,24 +104,22 @@ impl VideoGenClient {
 
         let uris = image_uris.unwrap_or(&[]);
 
-        // Strip the "data:image/png;base64," prefix — the video API expects raw base64.
-        let raw_b64: Vec<String> = uris
-            .iter()
-            .map(|uri| uri.strip_prefix("data:image/png;base64,").unwrap_or(uri).to_string())
-            .collect();
-
-        if raw_b64.len() == 1 {
-            // Single-image → flat `image` field (backward compatible)
-            body["image"] = serde_json::json!(&raw_b64[0]);
-        } else if raw_b64.len() >= 2 {
-            // Multi-image → `extra_body.image` array
-            let mut extra = serde_json::json!({ "image": raw_b64 });
-            if is_keyframe {
+        // Use extra_body.image array with data URIs (data:image/png;base64,...) —
+        // same format as the image generation API. The video API shares the same
+        // image handling backend and expects data URIs, not raw base64.
+        if !uris.is_empty() {
+            let mut extra = serde_json::json!({ "image": uris });
+            if is_keyframe && uris.len() >= 2 {
                 extra["mode"] = serde_json::json!("keyframes");
             }
             body["extra_body"] = extra;
         }
-        // uris.len() == 0: text-to-video, no image field needed
+
+        eprintln!(
+            "[agnes] DEBUG: Video create: {} image(s), uri_len={}",
+            uris.len(),
+            uris.first().map(|u| u.len()).unwrap_or(0)
+        );
 
         if let Some(np) = negative_prompt {
             body["negative_prompt"] = serde_json::json!(np);

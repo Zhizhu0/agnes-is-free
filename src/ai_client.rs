@@ -41,6 +41,15 @@ pub enum MessageContent {
     Text(String),
     Image { id: String },
     Video { id: String },
+    /// Tool call result displayed in the UI.
+    ToolResult {
+        /// Tool name (e.g. "generate_image").
+        tool_name: String,
+        /// Formatted arguments shown to the user.
+        args_display: String,
+        /// Result text (success message or error).
+        result: String,
+    },
 }
 
 impl Default for MessageContent {
@@ -128,6 +137,23 @@ impl ChatMessage {
         }
     }
 
+    /// Create a tool result message for UI display.
+    pub fn tool_result(tool_name: &str, args_display: &str, result: &str) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: MessageContent::ToolResult {
+                tool_name: tool_name.to_string(),
+                args_display: args_display.to_string(),
+                result: result.to_string(),
+            },
+            tool_calls: None,
+            tool_call_id: None,
+            image_urls: None,
+            uploaded_image: None,
+            ref_resource_id: None,
+        }
+    }
+
 }
 
 /// Build the wireside "content" JSON value for a chat message.
@@ -138,6 +164,7 @@ pub fn content_json_for_api(_role: Role, msg: &ChatMessage) -> serde_json::Value
         MessageContent::Text(s) => s.clone(),
         MessageContent::Image { id } => format!("[generated image: {id}]"),
         MessageContent::Video { id } => format!("[generated video: {id}]"),
+        MessageContent::ToolResult { result, .. } => result.clone(),
     };
     match &msg.image_urls {
         Some(urls) if !urls.is_empty() => {

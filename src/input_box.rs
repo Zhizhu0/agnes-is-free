@@ -403,7 +403,11 @@ pub fn input_box(
     // ── Draw text content (bottom row) ──
     let has_preedit = focused && !state.ime_preedit.is_empty();
     let display_text = if has_preedit {
-        format!("{}{}", state.text, state.ime_preedit)
+        // Insert preedit at cursor position (not at the end).
+        let byte_idx = char_char_to_byte(&state.text, state.cursor_char);
+        let mut s = state.text.clone();
+        s.insert_str(byte_idx, &state.ime_preedit);
+        s
     } else {
         state.text.clone()
     };
@@ -428,16 +432,17 @@ pub fn input_box(
         );
     }
 
-    // ── Draw underline beneath pre-edit string ──
+    // ── Draw underline beneath pre-edit string (at cursor position) ──
     if has_preedit {
         let font_id = FontId::proportional(14.0);
-        let committed_width = painter
-            .layout(state.text.clone(), font_id.clone(), Color32::BLACK, text_area_width)
+        let text_before_cursor: String = state.text.chars().take(state.cursor_char).collect();
+        let cursor_text_width = painter
+            .layout(text_before_cursor, font_id.clone(), Color32::BLACK, text_area_width)
             .rect
             .width();
 
         let text_baseline = text_y + 4.0;
-        let underline_start = rect.min.x + PADDING_LEFT + committed_width;
+        let underline_start = rect.min.x + PADDING_LEFT + cursor_text_width;
         let underline_end = underline_start + painter
             .layout(state.ime_preedit.clone(), font_id, Color32::BLACK, text_area_width)
             .rect
@@ -449,22 +454,18 @@ pub fn input_box(
         );
     }
 
-    // ── Draw cursor line at cursor_char position (bottom row) ──
+    // ── Draw cursor line (bottom row) ──
     let mut cursor_rect = Rect::NOTHING;
     if focused {
-        // Measure width of text up to cursor_char to find cursor x position.
-        let text_before_cursor: String = state.text.chars().take(state.cursor_char).collect();
-        let cursor_x_offset = if state.cursor_char <= state.text.chars().count() {
-            // Cursor is within committed text.
-            let laid = painter
-                .layout(text_before_cursor, FontId::proportional(14.0), Color32::BLACK, text_area_width);
-            laid.rect.width()
-        } else {
-            // Cursor is after all committed text — position after preedit.
-            let laid = painter
-                .layout(display_text, FontId::proportional(14.0), Color32::BLACK, text_area_width);
-            laid.rect.width()
-        };
+        // Measure width of text up to cursor_char (+ preedit if composing).
+        let mut text_before_cursor: String = state.text.chars().take(state.cursor_char).collect();
+        if has_preedit {
+            text_before_cursor.push_str(&state.ime_preedit);
+        }
+        let cursor_x_offset = painter
+            .layout(text_before_cursor, FontId::proportional(14.0), Color32::BLACK, text_area_width)
+            .rect
+            .width();
 
         let cursor_x = rect.min.x + PADDING_LEFT + cursor_x_offset + 1.0;
         let cursor_top = bottom_row_top + 4.0;
