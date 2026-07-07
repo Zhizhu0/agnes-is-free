@@ -1993,6 +1993,7 @@ impl eframe::App for AgnesApp {
                             if ui.button("Save").clicked() {
                                 let api_key = self.state.lock().unwrap().settings_api_key.clone();
                                 self.persist_settings(api_key);
+                                self.state.lock().unwrap().show_settings = false;
                             }
                             if ui.button("Cancel").clicked() {
                                 self.state.lock().unwrap().show_settings = false;
