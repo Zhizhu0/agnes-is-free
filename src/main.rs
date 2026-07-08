@@ -2214,8 +2214,51 @@ impl AgnesApp {
                 // Render text with markdown styling.
                 let rich_texts = markdown::render_markdown(text);
                 let mut line_segments: Vec<RichText> = Vec::new();
+                let mut code_block_segments: Vec<RichText> = Vec::new();
+                let mut in_code_block = false;
+
                 for rt in rich_texts {
-                    if rt.text() == "\n" {
+                    let text = rt.text();
+                    if text == "\x00CB_START" {
+                        // Flush any pending normal text before entering a code block.
+                        if !line_segments.is_empty() {
+                            Self::render_line(ui, &line_segments);
+                            line_segments.clear();
+                        }
+                        in_code_block = true;
+                        code_block_segments.clear();
+                    } else if text == "\x00CB_END" {
+                        // Render the collected code block segments inside a styled frame.
+                        if in_code_block {
+                            ui.add_space(6.0);
+                            egui::Frame::NONE
+                                .fill(egui::Color32::from_rgb(0xF0, 0xF0, 0xF0))
+                                .corner_radius(egui::CornerRadius::same(8))
+                                .inner_margin(egui::Margin::symmetric(12, 10))
+                                .show(ui, |ui| {
+                                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                                    let mut cb_line: Vec<RichText> = Vec::new();
+                                    for cb_rt in &code_block_segments {
+                                        if cb_rt.text() == "\n" {
+                                            if !cb_line.is_empty() {
+                                                Self::render_line(ui, &cb_line);
+                                                cb_line.clear();
+                                            }
+                                        } else {
+                                            cb_line.push(cb_rt.clone());
+                                        }
+                                    }
+                                    if !cb_line.is_empty() {
+                                        Self::render_line(ui, &cb_line);
+                                    }
+                                });
+                            ui.add_space(6.0);
+                            in_code_block = false;
+                            code_block_segments.clear();
+                        }
+                    } else if in_code_block {
+                        code_block_segments.push(rt);
+                    } else if text == "\n" {
                         // Flush the current line.
                         if !line_segments.is_empty() {
                             Self::render_line(ui, &line_segments);
@@ -2227,9 +2270,36 @@ impl AgnesApp {
                         line_segments.push(rt);
                     }
                 }
+
                 // Flush remaining line.
                 if !line_segments.is_empty() {
                     Self::render_line(ui, &line_segments);
+                }
+                // Flush remaining code block (unterminated — safety fallback).
+                if in_code_block && !code_block_segments.is_empty() {
+                    ui.add_space(6.0);
+                    egui::Frame::NONE
+                        .fill(egui::Color32::from_rgb(0xF0, 0xF0, 0xF0))
+                        .corner_radius(egui::CornerRadius::same(8))
+                        .inner_margin(egui::Margin::symmetric(12, 10))
+                        .show(ui, |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 0.0);
+                            let mut cb_line: Vec<RichText> = Vec::new();
+                            for cb_rt in &code_block_segments {
+                                if cb_rt.text() == "\n" {
+                                    if !cb_line.is_empty() {
+                                        Self::render_line(ui, &cb_line);
+                                        cb_line.clear();
+                                    }
+                                } else {
+                                    cb_line.push(cb_rt.clone());
+                                }
+                            }
+                            if !cb_line.is_empty() {
+                                Self::render_line(ui, &cb_line);
+                            }
+                        });
+                    ui.add_space(6.0);
                 }
 
                 // Show inline thumbnail for uploaded image (user pasted).
