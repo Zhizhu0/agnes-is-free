@@ -62,12 +62,16 @@ impl InputBoxState {
 
 // ── Layout constants ──
 const BAR_HEIGHT: f32 = 44.0;
+const CURSOR_BLINK_PERIOD: f64 = 1.0;
+const MAX_INPUT_WIDTH: f32 = 800.0;
 const BAR_ROUNDING: u8 = 14;
 const PADDING_LEFT: f32 = 18.0;
 const PADDING_RIGHT: f32 = 50.0;
 const THUMB_SIZE: f32 = 30.0;
 const THUMB_ROUNDING: u8 = 8;
 const CURSOR_WIDTH: f32 = 1.5;
+const SELECTION_BG: Color32 = Color32::from_rgb(0x44, 0x99, 0xFF);
+const SELECTION_BORDER: Color32 = Color32::from_rgb(0x44, 0x99, 0xFF);
 
 /// Render the input box.  Returns actions for the caller.
 ///
@@ -83,9 +87,10 @@ pub fn input_box(
     ui: &mut Ui,
     gradient_phase: f32,
 ) -> Vec<InputAction> {
+    ui.horizontal_centered(|ui| {
     let mut actions = Vec::new();
 
-    let available_width = desired_width.min(ui.available_width());
+    let available_width = desired_width.min(ui.available_width()).min(MAX_INPUT_WIDTH);
 
     // ── Two-row layout ──────────────────────────────────────────────────
     // When thumbnails are present the bar is split into:
@@ -133,7 +138,7 @@ pub fn input_box(
     // "Focused ID … is not in the node list".  ui.interact here creates that
     // node AND gives us a properly-keyed response.
     let edit_id = ui.id().with("input_edit");
-    let response = ui.interact(rect, edit_id, egui::Sense::click());
+    let response = ui.interact(rect, edit_id, egui::Sense::click() | egui::Sense::drag() | egui::Sense::FOCUSABLE);
 
     if response.hovered() {
         ui.ctx().set_cursor_icon(CursorIcon::Text);
@@ -151,6 +156,33 @@ pub fn input_box(
     }
 
     let focused = ui.ctx().memory(|mem| mem.has_focus(edit_id));
+
+    // ── Request continuous repaints while focused so cursor blinks ──
+    if focused {
+        ui.ctx().request_repaint();
+    }
+
+    // ── Lock focus: prevent egui's keyboard navigation from stealing it ──
+    // egui's Focus::begin_pass() scans input events for arrow keys BEFORE
+    // any widget renders, setting a focus_direction that end_pass() later
+    // uses to move focus to the next widget (e.g. the settings button).
+    // set_focus_lock_filter installs an EventFilter on the focused widget;
+    // begin_pass() checks this filter and SKIPS navigation for matching keys.
+    // It only takes effect one frame after focus is gained (requires
+    // had_focus_last_frame), which is fine — the user clicks to focus first,
+    // then types.
+    if focused {
+        ui.ctx().memory_mut(|mem| {
+            mem.set_focus_lock_filter(
+                edit_id,
+                egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    ..Default::default()
+                },
+            );
+        });
+    }
 
     // ── Painter ──
     let painter = ui.painter();
@@ -184,6 +216,36 @@ pub fn input_box(
             }
         }
 
+        // ── Mouse drag selection ──
+        if response.drag_started() {
+            if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                let text_right = rect.max.x - PADDING_RIGHT - 36.0;
+                if pos.x >= rect.min.x + PADDING_LEFT && pos.x <= text_right
+                    && pos.y >= bottom_row_top + 4.0
+                    && pos.y <= rect.max.y - 4.0
+                {
+                    let offset_x = pos.x - rect.min.x - PADDING_LEFT;
+                    let char_idx = text_index_at_x(&state.text, offset_x, ui);
+                    state.cursor_char = char_idx.clamp(0, state.text.chars().count());
+                    state.selection_active = true;
+                    state.selection_start = Some(state.cursor_char);
+                }
+            }
+        }
+        if response.dragged() {
+            if let Some(pos) = ui.ctx().pointer_interact_pos() {
+                let text_right = rect.max.x - PADDING_RIGHT - 36.0;
+                if pos.x >= rect.min.x + PADDING_LEFT && pos.x <= text_right
+                    && pos.y >= bottom_row_top + 4.0
+                    && pos.y <= rect.max.y - 4.0
+                {
+                    let offset_x = pos.x - rect.min.x - PADDING_LEFT;
+                    let char_idx = text_index_at_x(&state.text, offset_x, ui);
+                    state.cursor_char = char_idx.clamp(0, state.text.chars().count());
+                }
+            }
+        }
+
         // ── Process keyboard / IME events ──
         let ctx = ui.ctx().clone();
         ctx.input(|i| {
@@ -191,12 +253,38 @@ pub fn input_box(
                 match event {
                     egui::Event::Ime(egui::ImeEvent::Preedit(text)) => {
                         let was_non_empty = !state.ime_preedit.is_empty();
+                        // Clear any active selection before showing preedit
+                        if state.selection_active && state.selection_start.is_some()
+                            && state.selection_start != Some(state.cursor_char)
+                        {
+                            let s = state.selection_start.unwrap().min(state.cursor_char);
+                            let e = state.selection_start.unwrap().max(state.cursor_char);
+                            let byte_s = char_char_to_byte(&state.text, s);
+                            let byte_e = char_char_to_byte(&state.text, e);
+                            state.text.drain(byte_s..byte_e);
+                            state.cursor_char = s;
+                            state.selection_active = false;
+                            state.selection_start = None;
+                        }
                         state.ime_preedit = text.clone();
                         if was_non_empty && text.is_empty() {
                             state.ime_skip_next_backspace = true;
                         }
                     }
                     egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                        // Delete selection before inserting committed text
+                        if state.selection_active && state.selection_start.is_some()
+                            && state.selection_start != Some(state.cursor_char)
+                        {
+                            let s = state.selection_start.unwrap().min(state.cursor_char);
+                            let e = state.selection_start.unwrap().max(state.cursor_char);
+                            let byte_s = char_char_to_byte(&state.text, s);
+                            let byte_e = char_char_to_byte(&state.text, e);
+                            state.text.drain(byte_s..byte_e);
+                            state.cursor_char = s;
+                            state.selection_active = false;
+                            state.selection_start = None;
+                        }
                         // Insert committed text at cursor position.
                         let byte_idx = char_char_to_byte(&state.text, state.cursor_char);
                         state.text.insert_str(byte_idx, text);
@@ -291,7 +379,10 @@ pub fn input_box(
                         } else {
                             state.selection_active = false;
                         }
-                        state.cursor_char = (state.cursor_char + 1).min(state.text.chars().count());
+                        let max_cursor = state.text.chars().count();
+                        if state.cursor_char < max_cursor {
+                            state.cursor_char = (state.cursor_char + 1).min(max_cursor);
+                        }
                     }
                     egui::Event::Key {
                         key: egui::Key::Home,
@@ -365,11 +456,65 @@ pub fn input_box(
                     } if modifiers.ctrl && !modifiers.shift => {
                         actions.push(InputAction::ImagePastePending);
                     }
+                    // Ctrl+A: select all
+                    egui::Event::Key {
+                        key: egui::Key::A,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.ctrl && !modifiers.shift => {
+                        let total = state.text.chars().count();
+                        state.selection_start = Some(0);
+                        state.cursor_char = total;
+                        state.selection_active = true;
+                    }
+                    // Ctrl+C: copy selection to clipboard
+                    egui::Event::Key {
+                        key: egui::Key::C,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.ctrl && !modifiers.shift => {
+                        if state.selection_active && state.selection_start.is_some() {
+                            let s = state.selection_start.unwrap().min(state.cursor_char);
+                            let e = state.selection_start.unwrap().max(state.cursor_char);
+                            let selected: String = state.text.chars().skip(s).take(e - s).collect();
+                            if !selected.is_empty() {
+                                if let Ok(mut cb) = arboard::Clipboard::new() {
+                                    let _ = cb.set_text(selected);
+                                }
+                            }
+                        }
+                    }
+                    // Ctrl+X: cut selection to clipboard
+                    egui::Event::Key {
+                        key: egui::Key::X,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.ctrl && !modifiers.shift => {
+                        if state.selection_active && state.selection_start.is_some() {
+                            let s = state.selection_start.unwrap().min(state.cursor_char);
+                            let e = state.selection_start.unwrap().max(state.cursor_char);
+                            let selected: String = state.text.chars().skip(s).take(e - s).collect();
+                            if !selected.is_empty() {
+                                if let Ok(mut cb) = arboard::Clipboard::new() {
+                                    let _ = cb.set_text(selected);
+                                }
+                                let byte_s = char_char_to_byte(&state.text, s);
+                                let byte_e = char_char_to_byte(&state.text, e);
+                                state.text.drain(byte_s..byte_e);
+                                state.cursor_char = s;
+                                state.selection_active = false;
+                                state.selection_start = None;
+                            }
+                        }
+                    }
                     _ => {}
                 }
             }
-        });
-    }
+            });
+        }
 
     // Clamp cursor to text bounds.
     state.cursor_char = state.cursor_char.min(state.text.chars().count());
@@ -458,30 +603,38 @@ pub fn input_box(
     // ── Draw cursor line (bottom row) ──
     let mut cursor_rect = Rect::NOTHING;
     if focused {
-        // Measure width of text up to cursor_char (+ preedit if composing).
-        let mut text_before_cursor: String = state.text.chars().take(state.cursor_char).collect();
-        if has_preedit {
-            text_before_cursor.push_str(&state.ime_preedit);
-        }
-        let cursor_x_offset = painter
-            .layout(text_before_cursor, FontId::proportional(14.0), Color32::BLACK, text_area_width)
-            .rect
-            .width();
+        // Blink the cursor: visible for the first half of each period.
+        let now = ui.input(|i| i.time);
+        let blink_phase = (now % CURSOR_BLINK_PERIOD) / CURSOR_BLINK_PERIOD;
+        let cursor_visible = blink_phase < 0.5;
 
-        let cursor_x = rect.min.x + PADDING_LEFT + cursor_x_offset + 1.0;
-        let cursor_top = bottom_row_top + 4.0;
-        let cursor_bot = rect.max.y - 4.0;
-        painter.line_segment(
-            [
+        if cursor_visible {
+            // Measure width of text up to cursor_char (+ preedit if composing).
+            let mut text_before_cursor: String = state.text.chars().take(state.cursor_char).collect();
+            if has_preedit {
+                text_before_cursor.push_str(&state.ime_preedit);
+            }
+            let cursor_x_offset = painter
+                .layout(text_before_cursor, FontId::proportional(14.0), Color32::BLACK, text_area_width)
+                .rect
+                .width();
+
+            let cursor_x = rect.min.x + PADDING_LEFT + cursor_x_offset + 1.0;
+            // Cursor height matches the text line: ascent + descent around the baseline.
+            let cursor_top = bottom_row_center - 9.0;
+            let cursor_bot = bottom_row_center + 4.0;
+            painter.line_segment(
+                [
+                    egui::pos2(cursor_x, cursor_top),
+                    egui::pos2(cursor_x, cursor_bot),
+                ],
+                Stroke::new(CURSOR_WIDTH, Color32::BLACK),
+            );
+            cursor_rect = Rect::from_min_max(
                 egui::pos2(cursor_x, cursor_top),
-                egui::pos2(cursor_x, cursor_bot),
-            ],
-            Stroke::new(CURSOR_WIDTH, Color32::BLACK),
-        );
-        cursor_rect = Rect::from_min_max(
-            egui::pos2(cursor_x, cursor_top),
-            egui::pos2(cursor_x + CURSOR_WIDTH, cursor_bot),
-        );
+                egui::pos2(cursor_x + CURSOR_WIDTH, cursor_bot),
+            );
+        }
     }
 
     // ── Tell winit to keep IME enabled while we're focused ──
@@ -612,6 +765,7 @@ pub fn input_box(
     }
 
     actions
+    }).inner
 }
 
 // ── Helper functions ──
@@ -671,16 +825,11 @@ fn draw_selection_rect(
         egui::vec2(laid_b.rect.width() - laid_a.rect.width(), sel_bot - sel_top),
     );
 
-    // Light blue background.
-    painter.rect_filled(
-        sel_rect,
-        2.0,
-        Color32::from_rgb(0xBB, 0xDD, 0xFF).linear_multiply(0.35),
-    );
+    painter.rect_filled(sel_rect, 2.0, SELECTION_BG.gamma_multiply(0.35));
     painter.rect_stroke(
         sel_rect,
         2.0,
-        Stroke::new(0.5, Color32::from_rgb(0x99, 0xBB, 0xEE)),
+        Stroke::new(0.5, SELECTION_BORDER),
         egui::StrokeKind::Middle,
     );
 }
