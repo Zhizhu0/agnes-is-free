@@ -81,6 +81,7 @@ pub fn input_box(
     desired_width: f32,
     is_streaming: bool,
     ui: &mut Ui,
+    gradient_phase: f32,
 ) -> Vec<InputAction> {
     let mut actions = Vec::new();
 
@@ -373,9 +374,9 @@ pub fn input_box(
     // Clamp cursor to text bounds.
     state.cursor_char = state.cursor_char.min(state.text.chars().count());
 
-    // ── Draw background ──
-    let bg = Color32::from_rgb(0xF0, 0xF0, 0xF2);
-    let border = Color32::from_rgb(0xCC, 0xCC, 0xCC);
+    // ── Draw background (warm gradient) ──
+    let bg = crate::animation::warm_gradient_bg(gradient_phase);
+    let border = crate::animation::warm_gradient_border(gradient_phase);
     let bw = 1.0;
     painter.rect_filled(rect, CornerRadius::same(BAR_ROUNDING), bg);
     painter.rect_stroke(
@@ -548,6 +549,15 @@ pub fn input_box(
 
     // ── Draw send / stop button (bottom row) ──
     let send_size = 30.0;
+    let now = ui.ctx().input(|i| i.time);
+    let pulsed = if is_streaming {
+        // pulse: scale oscillates 0.92..1.04
+        let s = (now * 4.0).sin() as f32; // −1..1
+        1.0 + s * 0.06
+    } else {
+        1.0
+    };
+    let send_radius = send_size / 2.0 * pulsed;
     let send_rect = Rect::from_min_size(
         egui::pos2(
             rect.max.x - send_size - 6.0,
@@ -578,9 +588,9 @@ pub fn input_box(
     };
     {
         let painter = ui.painter();
-        painter.circle_filled(send_rect.center(), send_size / 2.0, btn_bg);
+        painter.circle_filled(send_rect.center(), send_radius, btn_bg);
         if is_streaming {
-            let sq = 12.0;
+            let sq = 12.0 * pulsed;
             let square_rect = Rect::from_center_size(send_rect.center(), egui::vec2(sq, sq));
             painter.rect_filled(square_rect, egui::CornerRadius::same(2), Color32::WHITE);
         } else {

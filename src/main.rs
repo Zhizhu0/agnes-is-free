@@ -2,6 +2,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 mod ai_client;
+mod animation;
 mod config;
 mod image_gen;
 mod input_box;
@@ -16,6 +17,7 @@ use ai_client::{
 };
 use config::Config;
 use egui::load::SizedTexture;
+use animation::ease_out_cubic;
 use egui::{Color32, RichText, Ui};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -135,6 +137,24 @@ struct AppState {
     /// Pending first-frame thumbnails extracted from completed videos: (resource_id, png_bytes).
     /// Populated by the poll worker thread after download, drained in update() to register textures.
     pending_video_thumbnails: Vec<(String, Vec<u8>)>,
+
+    // ── Animation state ──
+    /// Input box vertical anchor: 0.0 = bottom, 1.0 = centered.
+    input_anchor: f32,
+    /// Starting anchor value for the active transition.
+    input_anchor_from: f32,
+    /// Target anchor value for the active transition.
+    input_anchor_to: f32,
+    /// Active transition for the input box position.
+    input_transition: Option<animation::Transition>,
+    /// Phase accumulator for warm gradient animation.
+    gradient_phase: f32,
+    /// Message entrance animations: (message_index, Transition).
+    intro_anims: Vec<(usize, animation::Transition)>,
+    /// Set of message indices that have already played their intro animation.
+    intro_done: std::collections::HashSet<usize>,
+    /// Whether we should request continuous repaints (during animations).
+    repaint_animating: bool,
 }
 
 impl AppState {
@@ -169,6 +189,16 @@ impl AppState {
             pending_video_stops: Vec::new(),
             pending_video_seeks: Vec::new(),
             pending_video_thumbnails: Vec::new(),
+
+            // Animation defaults
+            input_anchor: 1.0,
+            input_anchor_from: 1.0,
+            input_anchor_to: 1.0,
+            input_transition: None,
+            gradient_phase: 0.0,
+            intro_anims: Vec::new(),
+            intro_done: std::collections::HashSet::new(),
+            repaint_animating: false,
         }
     }
 
@@ -672,6 +702,14 @@ impl AgnesApp {
         state.assistant_buffer.clear();
         state.error = None;
 
+        // Trigger input box transition: slide from center to bottom.
+        {
+            let now = ctx.input(|i| i.time);
+            state.input_anchor_from = state.input_anchor;
+            state.input_anchor_to = 0.0;
+            state.input_transition = Some(animation::Transition::anchor(now));
+        }
+
         // Add system message with tool description if not already present.
         if !state.system_message_added {
             state.system_message_added = true;
@@ -853,7 +891,7 @@ impl AgnesApp {
                         app_state.assistant_buffer.push_str(&chunk);
                         drop(app_state);
                         ctx.request_repaint();
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(35)).await;
                     }
 
                     // Get the streaming result.
@@ -1822,6 +1860,30 @@ impl eframe::App for AgnesApp {
             }
         }
 
+        // ── Animation state updates ──
+        let now = ctx.input(|i| i.time);
+        {
+            let mut state = self.state.lock().unwrap();
+            // Advance gradient phase (~0.3 rad/s)
+            state.gradient_phase += ctx.input(|i| i.unstable_dt) as f32 * 0.45;
+
+            // Update input anchor transition
+            if let Some(t) = state.input_transition {
+                state.input_anchor = t.value(now, state.input_anchor_from, state.input_anchor_to);
+                if !t.done(now) {
+                    state.input_transition = Some(t);
+                } else {
+                    state.input_transition = None;
+                }
+            }
+
+            // Clean up finished intro animations
+            state.intro_anims.retain(|(_, t)| !t.done(now));
+
+            // Determine if we need continuous repaints for animations
+            state.repaint_animating = state.input_transition.is_some() || !state.intro_anims.is_empty();
+        }
+
         // Top bar
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -1837,125 +1899,65 @@ impl eframe::App for AgnesApp {
             });
         });
 
-        // Bottom input bar — custom input box with image paste support.
-        egui::TopBottomPanel::bottom("input_bar").show(ctx, |ui| {
-            ui.add_space(6.0);
+        // ── Main area: warm gradient background + messages + input box ──
+        // The input box is manually positioned: centered when no messages,
+        // at the bottom when messages exist. Smoothly animated between.
+        egui::CentralPanel::default().show(ctx, |ui| {
+            let screen_rect = ui.available_rect_before_wrap();
+            let (gradient_phase, input_anchor, has_messages) = {
+                let state = self.state.lock().unwrap();
+                (state.gradient_phase, state.input_anchor, !state.messages.is_empty())
+            };
 
-            let input_box_id = egui::Id::new("agnes_input_box");
-            let mut ib_state = input_box::InputBoxState::load(ctx, input_box_id);
+            // Draw warm gradient background
+            let painter = ui.painter();
+            let bg_top = crate::animation::warm_gradient_top(gradient_phase);
+            painter.rect_filled(screen_rect, egui::CornerRadius::ZERO, bg_top);
 
-            // Lock app state for read + write.
-            let mut state = self.state.lock().unwrap();
+            // Input box geometry
+            let input_w = 500.0_f32.min(screen_rect.width() - 24.0);
+            let input_h = 44.0_f32;
+            let margin_y = 12.0_f32;
 
-            // No need to track input length anymore — paste detection
-            // now happens inside input_box() by intercepting Ctrl+V.
+            // Compute input box Y: interpolate between centered and bottom
+            let center_y = (screen_rect.top() + screen_rect.bottom()) / 2.0 - input_h / 2.0;
+            let bottom_y = screen_rect.bottom() - input_h - margin_y * 2.0;
+            let input_y = crate::animation::lerp(bottom_y, center_y, input_anchor);
 
-            // Build a list of (texture, id) for all uploaded images.
-            let uploaded_tex: Vec<(&egui::TextureHandle, &str)> = state
-                .uploaded_images
-                .iter()
-                .filter_map(|id| state.textures.get(id).map(|tex| (tex, id.as_str())))
-                .collect();
-
-            // Error message (draw above input).
-            if let Some(ref err) = state.error {
-                ui.colored_label(Color32::RED, err);
-            }
-
-            // Render custom input box.
-            // `is_streaming` turns the send button into a stop button.
-            let actions = input_box::input_box(
-                &mut ib_state,
-                &uploaded_tex,
-                "Type a message...",
-                500.0,
-                state.streaming,
-                ui,
+            let input_x = (screen_rect.width() - input_w) / 2.0;
+            let input_rect = egui::Rect::from_min_size(
+                egui::pos2(screen_rect.left() + input_x, input_y),
+                egui::vec2(input_w, input_h),
             );
 
-            // Sync text back to app state.
-            state.input = ib_state.text.clone();
-
-            // Process actions returned by the input box.
-            for action in actions {
-                match action {
-                    input_box::InputAction::Send => {
-                        ib_state.text.clear();
-                        ib_state.cursor_char = 0;
-                        ib_state.selection_active = false;
-                        ib_state.selection_start = None;
-                        ib_state.clone().store(ctx, input_box_id);
-                        drop(state);
-                        self.send_message(ctx.clone());
-                        return;
-                    }
-                    input_box::InputAction::Stop => {
-                        drop(state);
-                        self.stop_streaming();
-                        ib_state.cursor_char = 0;
-                        ib_state.selection_active = false;
-                        ib_state.selection_start = None;
-                        ib_state.clone().store(ctx, input_box_id);
-                        return;
-                    }
-                    input_box::InputAction::ImagePastePending => {
-                        // Ctrl+V was pressed inside the TextEdit — the
-                        // widget already consumed the key event so the
-                        // TextEdit won't insert anything.  Now check the
-                        // clipboard for an image.
-                        const MAX_IMAGES: usize = 10;
-                        if state.uploaded_images.len() < MAX_IMAGES {
-                            log_info("[paste] ImagePastePending: checking clipboard...");
-                            match try_get_clipboard_image_png() {
-                                Some((png_bytes, width, height)) => {
-                                    let id = gen_resource_id(&mut state);
-                                    log_info(&format!(
-                                        "[paste] SUCCESS: stored image {} ({} bytes), {}x{}",
-                                        id, png_bytes.len(), width, height
-                                    ));
-                                    state.uploaded_images.push(id.clone());
-                                    state.image_bytes.insert(id.clone(), png_bytes.clone());
-                                    state.image_dimensions.insert(id.clone(), (width, height));
-                                    state.pending_images.push((id, png_bytes));
-                                }
-                                None => {
-                                    log_info("[paste] Clipboard had no image — doing nothing");
-                                }
-                            }
-                        } else {
-                            log_info(&format!(
-                                "[paste] ImagePastePending: already at max ({MAX_IMAGES}), ignoring"
-                            ));
-                        }
-                    }
-                    input_box::InputAction::CancelImage(image_id) => {
-                        state.uploaded_images.retain(|id| id != &image_id);
-                        state.image_bytes.remove(&image_id);
-                        state.textures.remove(&image_id);
-                        log_info(&format!("[upload] Canceled image {image_id}"));
-                    }
+            // ── Messages area (above input box) ──
+            if has_messages {
+                let msg_area = egui::Rect::from_min_max(
+                    screen_rect.left_top(),
+                    egui::pos2(screen_rect.right(), input_y - 6.0),
+                );
+                if msg_area.height() > 10.0 {
+                    let mut msg_child = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(msg_area)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    let mut state = self.state.lock().unwrap();
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(&mut msg_child, |ui| {
+                            self.render_messages(ui, &mut state);
+                        });
                 }
             }
 
-            // Persist input_box state for next frame.
-            ib_state.clone().store(ctx, input_box_id);
-
-            drop(state);
-            ui.add_space(6.0);
-        });
-
-        // Main area: messages only (takes all remaining space)
-        egui::CentralPanel::default().show(ctx, |ui| {
-            // Lock state mutably so render can push to pending_video_* queues.
-            let mut state = self.state.lock().unwrap();
-
-            // Message list (scrollable)
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, true])
-                .show(ui, |ui| {
-                    self.render_messages(ui, &mut state);
-                });
-            // Lock is dropped here; orchestration block below drains the queues.
+            // ── Input box (manually positioned) ──
+            let mut input_child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(input_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            self.render_input_area(&mut input_child, ctx, gradient_phase);
         });
 
         // Settings modal
@@ -2003,14 +2005,18 @@ impl eframe::App for AgnesApp {
             }
         }
 
-        // Request repaint during streaming, image generation, or pending video tasks.
+        // Request repaint during streaming, image generation, pending video tasks, or animations.
         {
             let state = self.state.lock().unwrap();
             let has_pending_video = state
                 .video_status
                 .values()
                 .any(|s| matches!(s, VideoStatus::Pending));
-            if state.streaming || state.generating_image || has_pending_video {
+            if state.streaming
+                || state.generating_image
+                || has_pending_video
+                || state.repaint_animating
+            {
                 ctx.request_repaint();
             }
         }
@@ -2018,7 +2024,109 @@ impl eframe::App for AgnesApp {
 }
 
 impl AgnesApp {
+    fn render_input_area(&self, ui: &mut Ui, ctx: &egui::Context, gradient_phase: f32) {
+        let input_box_id = egui::Id::new("agnes_input_box");
+        let mut ib_state = input_box::InputBoxState::load(ctx, input_box_id);
+        let mut state = self.state.lock().unwrap();
+
+        // Build a list of (texture, id) for all uploaded images.
+        let uploaded_tex: Vec<(&egui::TextureHandle, &str)> = state
+            .uploaded_images
+            .iter()
+            .filter_map(|id| state.textures.get(id).map(|tex| (tex, id.as_str())))
+            .collect();
+
+        // Error message (draw above input).
+        if let Some(ref err) = state.error {
+            ui.colored_label(Color32::RED, err);
+        }
+
+        // Render custom input box with gradient phase for warm colors.
+        let actions = input_box::input_box(
+            &mut ib_state,
+            &uploaded_tex,
+            "Type a message...",
+            ui.available_width(),
+            state.streaming,
+            ui,
+            gradient_phase,
+        );
+
+        // Sync text back to app state.
+        state.input = ib_state.text.clone();
+
+        // Process actions returned by the input box.
+        let mut should_send = false;
+        let mut should_stop = false;
+        for action in actions {
+            match action {
+                input_box::InputAction::Send => {
+                    ib_state.text.clear();
+                    ib_state.cursor_char = 0;
+                    ib_state.selection_active = false;
+                    ib_state.selection_start = None;
+                    ib_state.clone().store(ctx, input_box_id);
+                    should_send = true;
+                }
+                input_box::InputAction::Stop => {
+                    should_stop = true;
+                    ib_state.cursor_char = 0;
+                    ib_state.selection_active = false;
+                    ib_state.selection_start = None;
+                    ib_state.clone().store(ctx, input_box_id);
+                }
+                input_box::InputAction::ImagePastePending => {
+                    const MAX_IMAGES: usize = 10;
+                    if state.uploaded_images.len() < MAX_IMAGES {
+                        log_info("[paste] ImagePastePending: checking clipboard...");
+                        match try_get_clipboard_image_png() {
+                            Some((png_bytes, width, height)) => {
+                                let id = gen_resource_id(&mut state);
+                                state.uploaded_images.push(id.clone());
+                                state.image_bytes.insert(id.clone(), png_bytes.clone());
+                                state.image_dimensions.insert(id.clone(), (width, height));
+                                state.pending_images.push((id, png_bytes));
+                            }
+                            None => {
+                                log_info("[paste] Clipboard had no image");
+                            }
+                        }
+                    }
+                }
+                input_box::InputAction::CancelImage(image_id) => {
+                    state.uploaded_images.retain(|id| id != &image_id);
+                    state.image_bytes.remove(&image_id);
+                    state.textures.remove(&image_id);
+                }
+            }
+        }
+
+        // Persist input_box state for next frame.
+        ib_state.clone().store(ctx, input_box_id);
+        drop(state);
+
+        if should_send {
+            self.send_message(ctx.clone());
+        }
+        if should_stop {
+            self.stop_streaming();
+        }
+    }
+
     fn render_messages(&self, ui: &mut Ui, state: &mut AppState) {
+        let now = ui.ctx().input(|i| i.time);
+
+        // Assign intro animations to new non-system messages (only once per message).
+        for i in 0..state.messages.len() {
+            if state.messages[i].role == Role::System {
+                continue;
+            }
+            if !state.intro_done.contains(&i) {
+                state.intro_anims.push((i, animation::Transition::intro(now)));
+                state.intro_done.insert(i);
+            }
+        }
+
         // Render completed messages (skip System role messages).
         // Safety: messages vec is not mutated during iteration; borrow is split via raw ptr.
         let msg_count = state.messages.len();
@@ -2026,13 +2134,32 @@ impl AgnesApp {
             if state.messages[i].role == Role::System {
                 continue;
             }
+
+            // Apply intro animation: slight upward slide + fade in.
+            let (y_offset, alpha) = if let Some((_, t)) = state.intro_anims.iter().find(|(idx, _)| *idx == i) {
+                let progress = t.t(now) as f32;
+                let slide = (1.0 - ease_out_cubic(progress)) * 15.0;
+                (slide, ease_out_cubic(progress))
+            } else {
+                (0.0, 1.0)
+            };
+
+            if y_offset > 0.5 {
+                ui.add_space(y_offset);
+            }
+
+            if alpha < 0.999 {
+                ui.set_opacity(alpha);
+            }
+
             let msg_ptr = &state.messages[i] as *const ChatMessage;
             let msg_ref: &ChatMessage = unsafe { &*msg_ptr };
             self.render_message(ui, msg_ref, state);
+            ui.set_opacity(1.0);
             ui.separator();
         }
 
-        // Render streaming assistant message
+        // Render streaming assistant message (no intro animation for streaming)
         if state.streaming && !state.assistant_buffer.is_empty() {
             let msg = ChatMessage::text(Role::Assistant, &state.assistant_buffer);
             self.render_message(ui, &msg, state);
