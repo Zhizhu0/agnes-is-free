@@ -2729,12 +2729,22 @@ fn main() -> eframe::Result {
             }
 
             // Load Chinese font for CJK characters.
-            if let Some(font_data) = chinese_font_data() {
+            let chinese_loaded = if let Some(font_data) = chinese_font_data() {
                 fonts.font_data.insert(
                     "chinese".into(),
-                    Arc::new(egui::FontData::from_owned(font_data)),
+                    Arc::new(egui::FontData::from_owned(font_data.clone())),
                 );
-            }
+                fonts.font_data.insert(
+                    "input_chinese".into(),
+                    Arc::new(egui::FontData::from_owned(font_data).tweak(egui::FontTweak {
+                        y_offset: -1.25,
+                        ..Default::default()
+                    })),
+                );
+                true
+            } else {
+                false
+            };
 
             // Build Proportional family: emoji → chinese → original
             let mut proportional = fonts
@@ -2742,6 +2752,19 @@ fn main() -> eframe::Result {
                 .get(&egui::FontFamily::Proportional)
                 .cloned()
                 .unwrap_or_default();
+            let mut input_text_family = proportional.clone();
+            input_text_family.retain(|n| n != "emoji" && n != "chinese" && n != "input_chinese");
+            if emoji_loaded {
+                input_text_family.push("emoji".to_string());
+            }
+            if chinese_loaded {
+                input_text_family.push("input_chinese".to_string());
+            }
+            fonts.families.insert(
+                egui::FontFamily::Name(input_box::INPUT_TEXT_FONT_FAMILY.into()),
+                input_text_family,
+            );
+
             proportional.retain(|n| n != "emoji" && n != "chinese");
             proportional.insert(0, "emoji".to_string());
             proportional.insert(1, "chinese".to_string());

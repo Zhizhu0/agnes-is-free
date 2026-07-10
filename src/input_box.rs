@@ -16,7 +16,10 @@
 //! memory so the context receives keyboard events.  This preserves the
 //! original "click to focus" behavior — hovering does NOT gain focus.
 
-use egui::{Color32, CornerRadius, CursorIcon, FontId, Id, Rangef, Rect, Stroke, TextureHandle, Ui};
+use egui::{
+    Color32, CornerRadius, CursorIcon, FontFamily, FontId, Id, Rangef, Rect, Stroke,
+    TextureHandle, Ui,
+};
 
 /// High-level actions the widget wants the caller to handle.
 #[derive(Debug, Clone)]
@@ -65,6 +68,8 @@ const BAR_HEIGHT: f32 = 44.0;
 const CURSOR_BLINK_PERIOD: f64 = 1.0;
 const MAX_INPUT_WIDTH: f32 = 800.0;
 const BAR_ROUNDING: u8 = 14;
+pub const INPUT_TEXT_FONT_FAMILY: &str = "agnes_input_text";
+const INPUT_TEXT_FONT_SIZE: f32 = 14.0;
 const PADDING_LEFT: f32 = 18.0;
 const PADDING_RIGHT: f32 = 50.0;
 const THUMB_SIZE: f32 = 30.0;
@@ -72,6 +77,13 @@ const THUMB_ROUNDING: u8 = 8;
 const CURSOR_WIDTH: f32 = 1.5;
 const SELECTION_BG: Color32 = Color32::from_rgb(0x44, 0x99, 0xFF);
 const SELECTION_BORDER: Color32 = Color32::from_rgb(0x44, 0x99, 0xFF);
+
+fn input_text_font_id() -> FontId {
+    FontId::new(
+        INPUT_TEXT_FONT_SIZE,
+        FontFamily::Name(INPUT_TEXT_FONT_FAMILY.into()),
+    )
+}
 
 /// Render the input box.  Returns actions for the caller.
 ///
@@ -564,7 +576,7 @@ pub fn input_box(
             egui::pos2(rect.min.x + PADDING_LEFT, text_y),
             egui::Align2::LEFT_CENTER,
             &display_text,
-            FontId::proportional(14.0),
+            input_text_font_id(),
             Color32::BLACK,
         );
     } else if !focused {
@@ -573,14 +585,14 @@ pub fn input_box(
             egui::pos2(rect.min.x + PADDING_LEFT, text_y),
             egui::Align2::LEFT_CENTER,
             hint,
-            FontId::proportional(14.0),
+            input_text_font_id(),
             Color32::from_rgb(0xAA, 0xAA, 0xAA),
         );
     }
 
     // ── Draw underline beneath pre-edit string (at cursor position) ──
     if has_preedit {
-        let font_id = FontId::proportional(14.0);
+        let font_id = input_text_font_id();
         let text_before_cursor: String = state.text.chars().take(state.cursor_char).collect();
         let cursor_text_width = painter
             .layout(text_before_cursor, font_id.clone(), Color32::BLACK, text_area_width)
@@ -615,7 +627,7 @@ pub fn input_box(
                 text_before_cursor.push_str(&state.ime_preedit);
             }
             let cursor_x_offset = painter
-                .layout(text_before_cursor, FontId::proportional(14.0), Color32::BLACK, text_area_width)
+                .layout(text_before_cursor, input_text_font_id(), Color32::BLACK, text_area_width)
                 .rect
                 .width();
 
@@ -773,7 +785,7 @@ pub fn input_box(
 /// Given an offset-x from the left padding, find the character index
 /// in `text` that the click landed on.
 fn text_index_at_x(text: &str, offset_x: f32, ui: &Ui) -> usize {
-    let font_id = FontId::proportional(14.0);
+    let font_id = input_text_font_id();
     let total_chars = text.chars().count();
     if total_chars == 0 {
         return 0;
@@ -817,8 +829,8 @@ fn draw_selection_rect(
     let clamped_end = end.min(text.chars().count());
     let prefix_b: String = text.chars().take(clamped_end).collect();
 
-    let laid_a = painter.layout(prefix_a, FontId::proportional(14.0), Color32::BLACK, wrap_width);
-    let laid_b = painter.layout(prefix_b, FontId::proportional(14.0), Color32::BLACK, wrap_width);
+    let laid_a = painter.layout(prefix_a, input_text_font_id(), Color32::BLACK, wrap_width);
+    let laid_b = painter.layout(prefix_b, input_text_font_id(), Color32::BLACK, wrap_width);
 
     let sel_rect = Rect::from_min_size(
         egui::pos2(rect.min.x + padding_left + laid_a.rect.width(), sel_top),
