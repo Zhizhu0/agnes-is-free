@@ -25,6 +25,10 @@ use std::time::Duration;
 use video_player::VideoPlayerState;
 use video_task::VideoStatus;
 
+const SIDEBAR_EXPANDED_W: f32 = 260.0;
+const SIDEBAR_COLLAPSED_W: f32 = 56.0;
+const SIDEBAR_ANIM_MS: u32 = 280;
+
 /// Compute display size for an image: scale to fit within max_width
 /// while preserving aspect ratio (max 320px height to avoid giant images).
 fn image_fit_size(handle: &egui::TextureHandle, max_width: f32) -> egui::Vec2 {
@@ -155,6 +159,18 @@ struct AppState {
     intro_done: std::collections::HashSet<usize>,
     /// Whether we should request continuous repaints (during animations).
     repaint_animating: bool,
+
+    // ── Sidebar ──
+    /// Logical expand target: true = open (260px), false = rail (56px).
+    sidebar_expanded: bool,
+    /// Current animated sidebar width in points.
+    sidebar_width: f32,
+    /// Transition start width.
+    sidebar_width_from: f32,
+    /// Transition end width.
+    sidebar_width_to: f32,
+    /// Active width transition for the sidebar.
+    sidebar_transition: Option<animation::Transition>,
 }
 
 impl AppState {
@@ -199,6 +215,12 @@ impl AppState {
             intro_anims: Vec::new(),
             intro_done: std::collections::HashSet::new(),
             repaint_animating: false,
+
+            sidebar_expanded: true,
+            sidebar_width: SIDEBAR_EXPANDED_W,
+            sidebar_width_from: SIDEBAR_EXPANDED_W,
+            sidebar_width_to: SIDEBAR_EXPANDED_W,
+            sidebar_transition: None,
         }
     }
 
@@ -1877,14 +1899,28 @@ impl eframe::App for AgnesApp {
                 }
             }
 
+            // Update sidebar width transition
+            if let Some(t) = state.sidebar_transition {
+                state.sidebar_width =
+                    t.value(now, state.sidebar_width_from, state.sidebar_width_to);
+                if !t.done(now) {
+                    state.sidebar_transition = Some(t);
+                } else {
+                    state.sidebar_width = state.sidebar_width_to;
+                    state.sidebar_transition = None;
+                }
+            }
+
             // Clean up finished intro animations
             state.intro_anims.retain(|(_, t)| !t.done(now));
 
             // Determine if we need continuous repaints for animations
-            state.repaint_animating = state.input_transition.is_some() || !state.intro_anims.is_empty();
+            state.repaint_animating = state.input_transition.is_some()
+                || state.sidebar_transition.is_some()
+                || !state.intro_anims.is_empty();
         }
 
-        // Top bar
+        // Top bar (full width above sidebar + main)
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Agnes AI Chat");
@@ -1898,6 +1934,51 @@ impl eframe::App for AgnesApp {
                 });
             });
         });
+
+        // ── Left sidebar (Gemini-style collapsible rail) ──
+        let sidebar_width = {
+            let state = self.state.lock().unwrap();
+            state.sidebar_width
+        };
+        egui::SidePanel::left("sidebar")
+            .exact_width(sidebar_width)
+            .resizable(false)
+            .show_separator_line(true)
+            .frame(
+                egui::Frame::new()
+                    .fill(Color32::from_rgb(0xF0, 0xEE, 0xEB))
+                    .inner_margin(egui::Margin::same(0)),
+            )
+            .show(ctx, |ui| {
+                ui.set_min_height(ui.available_height());
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    ui.add_space(12.0);
+                    let btn = egui::Button::new(RichText::new("☰").size(16.0))
+                        .frame(true)
+                        .corner_radius(18.0)
+                        .min_size(egui::vec2(36.0, 36.0));
+                    if ui.add(btn).clicked() {
+                        let mut st = self.state.lock().unwrap();
+                        st.sidebar_expanded = !st.sidebar_expanded;
+                        st.sidebar_width_from = st.sidebar_width;
+                        st.sidebar_width_to = if st.sidebar_expanded {
+                            SIDEBAR_EXPANDED_W
+                        } else {
+                            SIDEBAR_COLLAPSED_W
+                        };
+                        st.sidebar_transition =
+                            Some(animation::Transition::new(now, SIDEBAR_ANIM_MS));
+                        st.repaint_animating = true;
+                        ctx.request_repaint();
+                    }
+                    // Show label only when wide enough to avoid overflow in rail mode.
+                    if sidebar_width > 120.0 {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Agnes").strong().size(14.0));
+                    }
+                });
+            });
 
         // ── Main area: warm gradient background + messages + input box ──
         // The input box is manually positioned: centered when no messages,
@@ -2729,45 +2810,39 @@ fn main() -> eframe::Result {
             }
 
             // Load Chinese font for CJK characters.
+            // Latin fonts stay first; CJK is fallback with a small y_offset so
+            // Chinese/English share the same visual baseline (same as input box).
             let chinese_loaded = if let Some(font_data) = chinese_font_data() {
-                fonts.font_data.insert(
-                    "chinese".into(),
-                    Arc::new(egui::FontData::from_owned(font_data.clone())),
-                );
-                fonts.font_data.insert(
-                    "input_chinese".into(),
-                    Arc::new(egui::FontData::from_owned(font_data).tweak(egui::FontTweak {
+                let chinese = Arc::new(egui::FontData::from_owned(font_data).tweak(
+                    egui::FontTweak {
                         y_offset: -1.25,
                         ..Default::default()
-                    })),
-                );
+                    },
+                ));
+                fonts.font_data.insert("chinese".into(), chinese.clone());
+                fonts.font_data.insert("input_chinese".into(), chinese);
                 true
             } else {
                 false
             };
 
-            // Build Proportional family: emoji → chinese → original
+            // Build font families: Latin first → emoji → chinese (baseline-tweaked).
             let mut proportional = fonts
                 .families
                 .get(&egui::FontFamily::Proportional)
                 .cloned()
                 .unwrap_or_default();
-            let mut input_text_family = proportional.clone();
-            input_text_family.retain(|n| n != "emoji" && n != "chinese" && n != "input_chinese");
+            proportional.retain(|n| n != "emoji" && n != "chinese" && n != "input_chinese");
             if emoji_loaded {
-                input_text_family.push("emoji".to_string());
+                proportional.push("emoji".to_string());
             }
             if chinese_loaded {
-                input_text_family.push("input_chinese".to_string());
+                proportional.push("chinese".to_string());
             }
             fonts.families.insert(
                 egui::FontFamily::Name(input_box::INPUT_TEXT_FONT_FAMILY.into()),
-                input_text_family,
+                proportional.clone(),
             );
-
-            proportional.retain(|n| n != "emoji" && n != "chinese");
-            proportional.insert(0, "emoji".to_string());
-            proportional.insert(1, "chinese".to_string());
             fonts.families.insert(egui::FontFamily::Proportional, proportional);
 
             // Also add chinese font to Monospace family so code blocks render CJK.
@@ -2777,8 +2852,10 @@ fn main() -> eframe::Result {
                     .get(&egui::FontFamily::Monospace)
                     .cloned()
                     .unwrap_or_default();
-                monospace.retain(|n| n != "chinese");
-                monospace.insert(0, "chinese".to_string());
+                monospace.retain(|n| n != "chinese" && n != "input_chinese");
+                if chinese_loaded {
+                    monospace.push("chinese".to_string());
+                }
                 fonts.families.insert(egui::FontFamily::Monospace, monospace);
             }
 
